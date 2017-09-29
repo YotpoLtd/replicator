@@ -6,10 +6,12 @@ import (
 	"time"
 
 	"github.com/dariubs/percent"
+	nomad "github.com/hashicorp/nomad/api"
+	nomadStructs "github.com/hashicorp/nomad/nomad/structs"
+
 	"github.com/elsevier-core-engineering/replicator/helper"
 	"github.com/elsevier-core-engineering/replicator/logging"
 	"github.com/elsevier-core-engineering/replicator/replicator/structs"
-	nomad "github.com/hashicorp/nomad/api"
 )
 
 // Scaling metric types indicate the most-utilized resource across the cluster. When evaluating
@@ -26,13 +28,6 @@ const (
 	ScalingDirectionOut  = "Out"
 	ScalingDirectionIn   = "In"
 	ScalingDirectionNone = "None"
-)
-
-// Set of possible states for a job.
-const (
-	StatePending = "pending"
-	StateRunning = "running"
-	StateDead    = "dead"
 )
 
 const scaleInCapacityThreshold = 90.0
@@ -194,7 +189,8 @@ func (c *nomadClient) DrainNode(nodeID string) (err error) {
 			// Iterate over allocations, if any are running or pending, increment the active
 			// allocations counter.
 			for _, nodeAlloc := range allocations {
-				if (nodeAlloc.ClientStatus == StateRunning) || (nodeAlloc.ClientStatus == "pending") {
+				if (nodeAlloc.ClientStatus == nomadStructs.AllocClientStatusRunning) ||
+					(nodeAlloc.ClientStatus == nomadStructs.AllocClientStatusPending) {
 					activeAllocations++
 				}
 			}
@@ -276,7 +272,9 @@ func (c *nomadClient) GetJobAllocations(allocs []*nomad.AllocationListStub, gsp 
 	nAllocs := 0
 
 	for _, allocationStub := range allocs {
-		if (allocationStub.ClientStatus == StateRunning) && (allocationStub.DesiredStatus == "run") {
+		if (allocationStub.ClientStatus == nomadStructs.AllocClientStatusRunning) &&
+			(allocationStub.DesiredStatus == nomadStructs.AllocDesiredStatusRun) {
+
 			if alloc, _, err := c.nomad.Allocations().Info(allocationStub.ID, &nomad.QueryOptions{}); err == nil && alloc != nil {
 				cpuPercent, memPercent := c.GetAllocationStats(alloc, gsp)
 				cpuPercentAll += cpuPercent
