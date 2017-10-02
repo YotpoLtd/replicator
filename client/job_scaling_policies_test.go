@@ -31,9 +31,8 @@ func TestJobScalingPolicies_updateScalingPolicy(t *testing.T) {
 	updateScalingPolicy(jobName2, groupName2, metaKeys, scaling)
 	updateScalingPolicy(jobName2, groupName3, metaKeys, scaling)
 
-	expected := &structs.JobScalingPolicies{
-		Policies: make(map[string][]*structs.GroupScalingPolicy),
-	}
+	expected := &structs.JobScalingPolicies{}
+
 	policy1 := &structs.GroupScalingPolicy{
 		GroupName:   "cache",
 		Cooldown:    60,
@@ -70,11 +69,28 @@ func TestJobScalingPolicies_updateScalingPolicy(t *testing.T) {
 		ScaleOutCPU: 90,
 		UID:         "ELS2",
 	}
-	expected.Policies["example"] = append(expected.Policies["example"], policy1)
-	expected.Policies["woz"] = append(expected.Policies["woz"], policy2)
-	expected.Policies["woz"] = append(expected.Policies["woz"], policy3)
+	expected.Policies.Store("example", []*structs.GroupScalingPolicy{
+		policy1,
+	})
+	expected.Policies.Store("woz", []*structs.GroupScalingPolicy{
+		policy2,
+		policy3,
+	})
 
-	if !reflect.DeepEqual(scaling.Policies, expected.Policies) {
+	equal := true
+	scaling.Policies.Range(func(key, val interface{}) bool{
+		if expectedVal, ok := expected.Policies.Load(key); ok {
+			if !reflect.DeepEqual(expectedVal, val) {
+				t.Errorf("expected \n %#v\n\n, got \n\n %#v\n\n", expectedVal, val)
+				equal = false
+			}
+		} else {
+			t.Errorf("could not find key %#v in list of expected values", key)
+			equal = false
+		}
+		return equal
+	})
+	if !equal {
 		t.Fatalf("expected \n%#v\n\n, got \n\n%#v\n\n", expected.Policies, scaling.Policies)
 	}
 }
@@ -83,8 +99,13 @@ func TestJobScalingPolicies_removeScalingPolicy(t *testing.T) {
 	scaling := exampleJobScalingPolicies()
 	removeGroupScalingPolicy("example", "cache", scaling)
 
-	if len(scaling.Policies) != 0 {
-		t.Fatalf("expected empty map return, got %v entries", len(scaling.Policies))
+	var size int
+	scaling.Policies.Range(func(_, _ interface{}) bool {
+		size++
+		return true
+	})
+	if size != 0 {
+		t.Fatalf("expected empty map return, got %v entries", size)
 	}
 }
 
@@ -92,8 +113,13 @@ func TestJobScalingPolicies_removeJobScalingPolicy(t *testing.T) {
 	scaling := exampleJobScalingPolicies()
 	RemoveJobScalingPolicy("example", scaling)
 
-	if len(scaling.Policies) != 0 {
-		t.Fatalf("expected empty map return, got %v entries", len(scaling.Policies))
+	var size int
+	scaling.Policies.Range(func(_, _ interface{}) bool {
+		size++
+		return true
+	})
+	if size != 0 {
+		t.Fatalf("expected empty map return, got %v entries", size)
 	}
 }
 
@@ -121,7 +147,10 @@ func TestJobScalingPolicies_checkOrphanedGroup(t *testing.T) {
 		ScaleOutCPU: 90,
 		UID:         "ELS1",
 	}
-	scaling.Policies["example"] = append(scaling.Policies["example"], policy2)
+	vali, _ := scaling.Policies.Load("example")
+	val := vali.([]*structs.GroupScalingPolicy)
+	val = append(val, policy2)
+	scaling.Policies.Store("example", val)
 
 	checkOrphanedGroup("example", groups, scaling)
 	if !reflect.DeepEqual(scaling, expected) {
@@ -130,9 +159,7 @@ func TestJobScalingPolicies_checkOrphanedGroup(t *testing.T) {
 }
 
 func exampleJobScalingPolicies() *structs.JobScalingPolicies {
-	scaling := &structs.JobScalingPolicies{
-		Policies: make(map[string][]*structs.GroupScalingPolicy),
-	}
+	scaling := &structs.JobScalingPolicies{}
 
 	policy := &structs.GroupScalingPolicy{
 		GroupName:   "cache",
@@ -146,6 +173,9 @@ func exampleJobScalingPolicies() *structs.JobScalingPolicies {
 		ScaleOutCPU: 80,
 		UID:         "ELS1",
 	}
-	scaling.Policies["example"] = append(scaling.Policies["example"], policy)
+	val := []*structs.GroupScalingPolicy{
+		policy,
+	}
+	scaling.Policies.Store("example", val)
 	return scaling
 }

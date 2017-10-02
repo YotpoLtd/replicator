@@ -46,9 +46,9 @@ func (c *nomadClient) JobWatcher(jobScalingPolicies *structs.JobScalingPolicies)
 			// policy struct.
 			switch job.Status {
 			case nomadStructs.JobStatusRunning:
-				go c.jobScalingPolicyProcessor(job.ID, jobScalingPolicies)
+				c.jobScalingPolicyProcessor(job.ID, jobScalingPolicies)
 			case nomadStructs.JobStatusDead:
-				go RemoveJobScalingPolicy(job.ID, jobScalingPolicies)
+				RemoveJobScalingPolicy(job.ID, jobScalingPolicies)
 			default:
 				continue
 			}
@@ -97,7 +97,7 @@ func (c *nomadClient) jobScalingPolicyProcessor(jobID string, scaling *structs.J
 	}
 
 	// Run the checkOrphanedGroup function.
-	go checkOrphanedGroup(jobID, jobInfo.TaskGroups, scaling)
+	checkOrphanedGroup(jobID, jobInfo.TaskGroups, scaling)
 
 	for _, group := range jobInfo.TaskGroups {
 
@@ -114,7 +114,7 @@ func (c *nomadClient) jobScalingPolicyProcessor(jobID string, scaling *structs.J
 		if len(missedKeys) == len(requiredKeys) {
 			logging.Debug("client/job_scaling_policies: job %s and group %v is not configured for autoscaling",
 				jobID, *group.Name)
-			go removeGroupScalingPolicy(jobID, *group.Name, scaling)
+			removeGroupScalingPolicy(jobID, *group.Name, scaling)
 			continue
 		}
 
@@ -132,20 +132,20 @@ func (c *nomadClient) jobScalingPolicyProcessor(jobID string, scaling *structs.J
 		if len(missedKeys) == 0 {
 			logging.Debug("client/job_scaling_policies: job %s and group %v has all meta required for autoscaling",
 				jobID, *group.Name)
-			go func() {
+			//go func() {
 				err := updateScalingPolicy(jobID, *group.Name, group.Meta, scaling)
 				if err != nil {
 					logging.Error("client/job_scaling_policies: unable to update scaling policy for job %v and group %v: %v",
 						jobID, group.Name, err)
 				}
-			}()
+			//}()
 		}
 	}
 }
 
 // updateScalingPolicy takes a JobGroups meta parameter and updates Replicators
 // JobScaling entry if required.
-func updateScalingPolicy(jobName, groupName string, groupMeta map[string]string,
+func updateScalingPolicy(jobID, groupName string, groupMeta map[string]string,
 	s *structs.JobScalingPolicies) (err error) {
 
 	result := structs.NewGroupScalingPolicy()
@@ -175,7 +175,8 @@ func updateScalingPolicy(jobName, groupName string, groupMeta map[string]string,
 	// If the job already has an entry in the scaling policies, attempt to find
 	// the group and overwrite with the new policy. If the job is found, but no
 	// group policy is found we append the new group policy to the job.
-	if val, ok := s.Policies[jobName]; ok {
+	if vali, ok := s.Policies.Load(jobID); ok {
+		val := vali.([]*structs.GroupScalingPolicy)
 		for i, group := range val {
 			if group.GroupName == groupName {
 				found = true
@@ -190,12 +191,14 @@ func updateScalingPolicy(jobName, groupName string, groupMeta map[string]string,
 
 				val[i] = result
 				logging.Info("client/job_scaling_policies: updated scaling policy for job %s and group %s",
-					jobName, groupName)
+					jobID, groupName)
 
 			} else {
-				s.Policies[jobName] = append(s.Policies[jobName], result)
+				newVal := vali.([]*structs.GroupScalingPolicy)
+				newVal = append(newVal, result)
+				s.Policies.Store(jobID, newVal)
 				logging.Info("client/job_scaling_policies: added new scaling policy for job %s and group %s",
-					jobName, groupName)
+					jobID, groupName)
 				found = true
 			}
 		}
@@ -204,9 +207,12 @@ func updateScalingPolicy(jobName, groupName string, groupMeta map[string]string,
 	// If the job and group have not been found, create a new entry for the job
 	// and add the group policy.
 	if !found {
-		s.Policies[jobName] = append(s.Policies[jobName], result)
-		logging.Info("client/job_scaling_policies: added new policy for job %s and group %s",
-			jobName, groupName)
+		newVal := []*structs.GroupScalingPolicy{
+			result,
+		}
+		s.Policies.Store(jobID, newVal)
+		logging.Info("client/job_scaling_policies: Not Found, adding new policy for job %s and group %s",
+			jobID, groupName)
 	}
 	s.Lock.Unlock()
 	return
@@ -215,44 +221,44 @@ func updateScalingPolicy(jobName, groupName string, groupMeta map[string]string,
 // removeScalingPolicy will remove a particular JobGroups scaling policy and
 // will also remove the Job entry from the map if there are no longer any Group
 // policies associated to it. This is used for jobs which are still running.
-func removeGroupScalingPolicy(jobName, groupName string, scaling *structs.JobScalingPolicies) {
-	if val, ok := scaling.Policies[jobName]; ok {
-		for i, group := range val {
-			if group.GroupName == groupName {
-				scaling.Lock.Lock()
-				scaling.Policies[jobName] = append(scaling.Policies[jobName][:i], scaling.Policies[jobName][i+1:]...)
-				scaling.Lock.Unlock()
+func removeGroupScalingPolicy(jobID, groupName string, scaling *structs.JobScalingPolicies) {
+	if vali, ok := scaling.Policies.Load(jobID); ok {
+		val := vali.([]*structs.GroupScalingPolicy)
+		newVal := make([]*structs.GroupScalingPolicy, 0)
+		for _, group := range val {
+			if group.GroupName != groupName {
+				newVal = append(newVal, group)
 				logging.Info("client/job_scaling_policies: removed policy for job %s and group %s",
-					jobName, groupName)
+					jobID, groupName)
 			}
 		}
-		if len(scaling.Policies[jobName]) == 0 {
-			scaling.Lock.Lock()
-			delete(scaling.Policies, jobName)
-			scaling.Lock.Unlock()
+
+		if len(newVal) == 0 {
+			scaling.Policies.Delete(jobID)
+		} else {
+			scaling.Policies.Store(jobID, newVal)
 		}
 	}
 }
 
 // RemoveJobScalingPolicy deletes the job entry within the the policies map.
-func RemoveJobScalingPolicy(jobName string, scaling *structs.JobScalingPolicies) {
-	if _, ok := scaling.Policies[jobName]; ok {
-		scaling.Lock.Lock()
-		delete(scaling.Policies, jobName)
-		scaling.Lock.Unlock()
-		logging.Info("client/job_scaling_policies: deleted job scaling entries for job %v", jobName)
+func RemoveJobScalingPolicy(jobID string, scaling *structs.JobScalingPolicies) {
+	if _, ok := scaling.Policies.Load(jobID); ok {
+		scaling.Policies.Delete(jobID)
+		logging.Info("client/job_scaling_policies: deleted job scaling entries for job %v", jobID)
 	}
 }
 
 // checkOrphanedGroup checks whether a job has been updated and removed a group
 // which has a scaling policy; thus removing the entry.
-func checkOrphanedGroup(jobName string, groups []*nomad.TaskGroup, scaling *structs.JobScalingPolicies) {
+func checkOrphanedGroup(jobID string, groups []*nomad.TaskGroup, scaling *structs.JobScalingPolicies) {
 
 	taskGroupNames := make([]string, 0)
 	taskGroupPolicyNames := make([]string, 0)
 
 	scaling.Lock.RLock()
-	if val, ok := scaling.Policies[jobName]; ok {
+	if vali, ok := scaling.Policies.Load(jobID); ok {
+		val := vali.([]*structs.GroupScalingPolicy)
 		for _, g := range val {
 			taskGroupPolicyNames = append(taskGroupPolicyNames, g.GroupName)
 		}
@@ -272,6 +278,6 @@ func checkOrphanedGroup(jobName string, groups []*nomad.TaskGroup, scaling *stru
 	scaling.Lock.RUnlock()
 
 	for _, g := range taskGroupPolicyNames {
-		removeGroupScalingPolicy(jobName, g, scaling)
+		removeGroupScalingPolicy(jobID, g, scaling)
 	}
 }

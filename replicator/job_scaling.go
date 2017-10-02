@@ -17,25 +17,32 @@ import (
 func newJobScalingPolicy() *structs.JobScalingPolicies {
 
 	return &structs.JobScalingPolicies{
-		Policies: make(map[string][]*structs.GroupScalingPolicy),
 		Lock:     sync.RWMutex{},
 	}
 }
 
 func (r *Runner) asyncJobScaling(jobScalingPolicies *structs.JobScalingPolicies) {
 
-	for job := range jobScalingPolicies.Policies {
+	jobScalingPolicies.Policies.Range(func(key, _ interface{}) bool {
+		job := key.(string)
 		if r.config.NomadClient.IsJobInDeployment(job) {
 			logging.Debug("core/job_scaling: job %s is in deployment, no scaling evaluation will be triggerd", job)
-			continue
+		} else {
+			r.jobScaling(job, jobScalingPolicies)
 		}
-		go r.jobScaling(job, jobScalingPolicies)
-	}
+		return true
+	})
 }
 
-func (r *Runner) jobScaling(jobName string, jobScalingPolicies *structs.JobScalingPolicies) {
+func (r *Runner) jobScaling(jobID string, jobScalingPolicies *structs.JobScalingPolicies) {
 
-	g := jobScalingPolicies.Policies[jobName]
+	gi, ok := jobScalingPolicies.Policies.Load(jobID)
+	if !ok {
+		logging.Error("core/job_scaling: unable to find job [%s] in list of Policies", jobID)
+		return
+	}
+
+	g := gi.([]*structs.GroupScalingPolicy)
 
 	// Scaling a Cluster Jobs requires access to both Consul and Nomad therefore
 	// we setup the clients here.
@@ -46,7 +53,7 @@ func (r *Runner) jobScaling(jobName string, jobScalingPolicies *structs.JobScali
 	// in a read/write lock and remove this as soon as possible as the
 	// remaining functions only need a read lock.
 	jobScalingPolicies.Lock.Lock()
-	err := nomadClient.EvaluateJobScaling(jobName, g)
+	err := nomadClient.EvaluateJobScaling(jobID, g)
 	jobScalingPolicies.Lock.Unlock()
 
 	// Horrible but required for jobs that have been purged as the policy
@@ -54,7 +61,7 @@ func (r *Runner) jobScaling(jobName string, jobScalingPolicies *structs.JobScali
 	// though the job doesn't exist. The string check is due to
 	// github.com/hashicorp/nomad/issues/1849
 	if err != nil && strings.Contains(err.Error(), "404") {
-		client.RemoveJobScalingPolicy(jobName, jobScalingPolicies)
+		client.RemoveJobScalingPolicy(jobID, jobScalingPolicies)
 		return
 	} else if err != nil {
 		logging.Error("core/job_scaling: unable to perform job resource evaluation: %v", err)
@@ -66,7 +73,7 @@ func (r *Runner) jobScaling(jobName string, jobScalingPolicies *structs.JobScali
 		// Setup a failure message to pass to the failsafe check.
 		message := &notifier.FailureMessage{
 			AlertUID:     group.UID,
-			ResourceID:   fmt.Sprintf("%s/%s", jobName, group.GroupName),
+			ResourceID:   fmt.Sprintf("%s/%s", jobID, group.GroupName),
 			ResourceType: JobType,
 		}
 
@@ -74,14 +81,14 @@ func (r *Runner) jobScaling(jobName string, jobScalingPolicies *structs.JobScali
 		s := &structs.ScalingState{
 			ResourceName: group.GroupName,
 			ResourceType: JobType,
-			StatePath: r.config.ConsulKeyRoot + "/state/jobs/" + jobName +
+			StatePath: r.config.ConsulKeyRoot + "/state/jobs/" + jobID +
 				"/" + group.GroupName,
 		}
 		consulClient.ReadState(s, true)
 
 		if !FailsafeCheck(s, r.config, 1, message) {
 			logging.Error("core/job_scaling: job \"%v\" and group \"%v\" is in "+
-				"failsafe mode", jobName, group.GroupName)
+				"failsafe mode", jobID, group.GroupName)
 			continue
 		}
 
@@ -90,22 +97,22 @@ func (r *Runner) jobScaling(jobName string, jobScalingPolicies *structs.JobScali
 
 		if !s.LastScalingEvent.Before(time.Now().Add(-cd)) {
 			logging.Debug("core/job_scaling: job \"%v\" and group \"%v\" has not reached scaling cooldown threshold of %s",
-				jobName, group.GroupName, cd)
+				jobID, group.GroupName, cd)
 			continue
 		}
 
 		if group.ScaleDirection == client.ScalingDirectionOut || group.ScaleDirection == client.ScalingDirectionIn {
 			if group.Enabled {
 				logging.Debug("core/job_scaling: scaling for job \"%v\" and group \"%v\" is enabled; a "+
-					"scaling operation (%v) will be requested", jobName, group.GroupName, group.ScaleDirection)
+					"scaling operation (%v) will be requested", jobID, group.GroupName, group.ScaleDirection)
 
 				// Submit the job and group for scaling.
-				nomadClient.JobGroupScale(jobName, group, s)
+				nomadClient.JobGroupScale(jobID, group, s)
 
 			} else {
 				logging.Debug("core/job_scaling: job scaling has been disabled; a "+
 					"scaling operation (%v) would have been requested for \"%v\" "+
-					"and group \"%v\"", group.ScaleDirection, jobName, group.GroupName)
+					"and group \"%v\"", group.ScaleDirection, jobID, group.GroupName)
 			}
 		}
 

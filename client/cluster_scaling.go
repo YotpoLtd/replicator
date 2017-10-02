@@ -181,17 +181,18 @@ func (c *nomadClient) calculatePoolConsumed(capacity *structs.ClusterCapacity,
 // held in reserve for future scaling overhead.
 func (c *nomadClient) calculateScalingReserve(capacity *structs.ClusterCapacity,
 	jobs *structs.JobScalingPolicies, workerPool *structs.WorkerPool) error {
-
+	var err error
 	// Get detailed information about each job.
-	for jobName := range jobs.Policies {
+	jobs.Policies.Range(func(jobNameI interface{}, _ interface{}) bool {
+		jobName := jobNameI.(string)
 		// Determine if the job has a valid allocation on our worker pool.
 		if ok := c.checkJobPlacement(jobName, workerPool); !ok {
-			continue
+			return true
 		}
-
-		job, _, err := c.nomad.Jobs().Info(jobName, &nomad.QueryOptions{})
+		var job *nomad.Job
+		job, _, err = c.nomad.Jobs().Info(jobName, &nomad.QueryOptions{})
 		if err != nil {
-			return err
+			return false
 		}
 
 		// Iterate over groups and tasks to compute consumed capacity.
@@ -202,10 +203,11 @@ func (c *nomadClient) calculateScalingReserve(capacity *structs.ClusterCapacity,
 				capacity.TaskAllocation.DiskMB += *task.Resources.DiskMB
 			}
 		}
+		return true
 
-	}
+	})
 
-	return nil
+	return err
 }
 
 // checkJobPlacement checks to see if a job is running on a specific worker

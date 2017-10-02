@@ -2,6 +2,7 @@ package structs
 
 import (
 	"sync"
+	"golang.org/x/sync/syncmap"
 	"time"
 )
 
@@ -19,7 +20,7 @@ func NewGroupScalingPolicy() *GroupScalingPolicy {
 type JobScalingPolicies struct {
 	LastChangeIndex uint64
 	Lock            sync.RWMutex
-	Policies        map[string][]*GroupScalingPolicy
+	Policies        syncmap.Map
 }
 
 // GroupScalingPolicy represents all the information needed to make
